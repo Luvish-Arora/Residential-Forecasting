@@ -8,7 +8,8 @@
 #
 # FLOW
 # ----
-# 1. Country selection  — pick from France, Germany, Italy, United Kingdom
+# 1. Country selection  — pick from France, Germany, Italy, United Kingdom,
+#                         Netherlands
 # 2. KPI selection      — exclude optional KPIs if desired
 # 3. Preprocessing      — lag analysis, ElasticNetCV, sign checking
 # 4. Forecast           — walk-forward validation + recursive 2026-2027
@@ -16,7 +17,9 @@
 # TARGET DATA
 # -----------
 #   Euroconstruct_data.xlsx — residential construction output (EUR mn)
-#   Years: 2006-2027  (train: 2006-2025, forecast: 2026-2027)
+#   Years: 2001-2027  (train: 2001-2025, forecast: 2026-2027)
+#
+# NOTE: Netherlands does not have housing permits data — excluded automatically.
 #
 # =============================================================================
 
@@ -73,7 +76,7 @@ KPI_CATALOGUE = [
     {
         "name": "housing_permits_yoy",
         "tier": "OPTIONAL",
-        "description": "Housing permits YoY% — leading indicator of construction starts",
+        "description": "Housing permits YoY% — leading indicator (not available for Netherlands)",
     },
     {
         "name": "hpi_yoy",
@@ -109,7 +112,11 @@ AVAILABLE_COUNTRIES = [
     "Germany",
     "Italy",
     "United Kingdom",
+    "Netherlands",
 ]
+
+# Countries where housing permits are not available
+NO_PERMITS_COUNTRIES = {"Netherlands"}
 
 
 # =============================================================================
@@ -122,12 +129,13 @@ def _pick_countries():
     print("=" * 72)
     print()
     for i, name in enumerate(AVAILABLE_COUNTRIES, start=1):
-        print(f"  [{i:>2}]  {name}")
+        note = "  (no housing permits data)" if name in NO_PERMITS_COUNTRIES else ""
+        print(f"  [{i:>2}]  {name}{note}")
     print()
     print("  Instructions:")
     print("    1          → single country")
     print("    1,3        → multiple countries")
-    print("    all        → all 4 countries")
+    print("    all        → all 5 countries")
     print()
 
     while True:
@@ -153,7 +161,8 @@ def _pick_countries():
 
     print(f"\n  ✓ Selected ({len(chosen)} {'country' if len(chosen)==1 else 'countries'}):")
     for c in chosen:
-        print(f"      • {c}")
+        note = "  ← housing permits excluded automatically" if c in NO_PERMITS_COUNTRIES else ""
+        print(f"      • {c}{note}")
     return chosen
 
 
@@ -370,7 +379,8 @@ def _print_header():
     print("=" * 72)
     print("   Housing / Construction Output Forecasting Pipeline")
     print("   Target: Euroconstruct residential construction (EUR mn)")
-    print("   Period: 2006-2027  |  Countries: France, Germany, Italy, UK")
+    print("   Period: 2001-2027  |  Countries: France, Germany, Italy,")
+    print("                                    United Kingdom, Netherlands")
     print("=" * 72)
 
 
