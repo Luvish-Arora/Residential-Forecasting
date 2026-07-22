@@ -1299,16 +1299,28 @@ def _export_forecast_json(country, ec_full, blended_lvl, hw_levels, lin_pct,
     cagr_reference = _cagr(base_level, ref_end,  n_years)
     cagr_predicted = _cagr(base_level, pred_end, n_years)
 
-    # Only the KPIs that actually survived feature selection for this
-    # country ("Major Effecting KPIs") — not the full KPI catalogue.
+    # Major Effecting KPIs = the 3 fixed elasticity KPIs (housing permits,
+    # interest rate change, labor cost — always present, since they're the
+    # ones with a real elasticity coefficient behind them) UNION whatever
+    # ElasticNet actually selected for this country (clean_features).
+    # Nothing from the rest of the KPI catalogue is included — only KPIs
+    # that were either always-on or actually chosen for this specific
+    # country's model show up here.
+    major_kpi_ids = list(ELASTICITY_KPIS) + [
+        f for f in clean_features if f not in ELASTICITY_KPIS
+    ]
     major_kpis = [
         {
             "id":         kpi,
             "label":      KPI_LABELS.get(kpi, kpi.replace("_", " ").title()),
             "elasticity": elasticities.get(kpi),
             "lagYears":   feature_lag_map.get(kpi, 0),
+            # True if ElasticNet actually picked this KPI for this
+            # country's model; False means it's here only because it's
+            # one of the 3 always-on elasticity KPIs.
+            "selected":   kpi in clean_features,
         }
-        for kpi in clean_features
+        for kpi in major_kpi_ids
     ]
 
     payload = {
