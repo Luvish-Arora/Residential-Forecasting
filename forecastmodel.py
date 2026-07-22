@@ -32,6 +32,7 @@
 # =============================================================================
 
 import os
+import json
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -60,6 +61,25 @@ except ImportError:
 
 OUT_DIR = os.path.join(os.getcwd(), "output")
 os.makedirs(OUT_DIR, exist_ok=True)
+
+# Human-readable labels for the "Major Effecting KPIs" panel in the React
+# dashboard. Mirrors the descriptions in main.py's KPI_CATALOGUE, kept as a
+# lightweight local copy so forecastmodel.py doesn't need to import main.py.
+# Any KPI id not listed here just falls back to a title-cased version of
+# its raw name, so nothing breaks if a new KPI/country is added later.
+KPI_LABELS = {
+    "interest_rate_chg":       "Interest Rate Change",
+    "gdp_yoy":                 "GDP YoY %",
+    "output_yoy_lag1":         "Prior-Year Output YoY %",
+    "disposable_income_yoy":   "Disposable Income YoY %",
+    "gross_income_yoy":        "Gross Income YoY %",
+    "population_yoy":          "Population YoY %",
+    "housing_permits_yoy":     "Housing Permits YoY %",
+    "hpi_yoy":                 "House Price Index YoY %",
+    "house_to_rent_ratio_yoy": "House-to-Rent Ratio YoY %",
+    "labor_cost_yoy":          "Labor Cost Index YoY %",
+    "household_size_chg":      "Household Size Change",
+}
 
 VALIDATE_FROM   = 2015
 MIN_TRAIN_ROWS  = 6
@@ -474,6 +494,7 @@ def run_forecast(prep):
     hist_clean      = prep["hist_clean"]
     train_lagged    = prep["train_lagged"]
     clean_features  = prep["CLEAN_FEATURES"]
+    feature_lag_map = prep.get("FEATURE_LAG_MAP", {})
     target_pct      = prep["TARGET_PCT"]
     target_lvl      = prep["TARGET_LVL"]
     COUNTRY         = prep["COUNTRY"]
@@ -1159,6 +1180,19 @@ def run_forecast(prep):
     print(f"  Chart B saved: {chart_b_path}")
 
     # =========================================================================
+    # JSON OUTPUT (React dashboard data layer — Phase 1)
+    # =========================================================================
+    _export_forecast_json(
+        country=COUNTRY, ec_full=ec_full,
+        blended_lvl=blended_lvl, hw_levels=hw_levels, lin_pct=lin_pct,
+        elasticities=elasticities, clean_features=clean_features,
+        feature_lag_map=feature_lag_map,
+        blend_hw=blend_hw, blend_el=blend_el, blend_ml=blend_ml,
+        train_end=train_end, test_end=test_end, out_dir=OUT_DIR,
+        start_year=start_year,
+    )
+
+    # =========================================================================
     # EXCEL OUTPUTS
     # =========================================================================
     _export_blended_excel(
@@ -1175,7 +1209,138 @@ def run_forecast(prep):
         start_year=start_year,
     )
 
-    print(f"\n  Outputs saved to: {OUT_DIR}/")
+# =============================================================================
+# JSON EXPORT — REACT DASHBOARD DATA LAYER  (Phase 1)
+# =============================================================================
+# Writes output/{Country}.json — everything the React app needs to draw the
+# actual-vs-forecast line, show both CAGR figures, and drive the "Major
+# Effecting KPIs" sliders. This does NOT replace the Excel/PNG outputs above;
+# it's an additional, machine-readable export aimed at the frontend.
+
+def _cagr(v_start, v_end, n_years):
+    """Compound annual growth rate between two levels, n_years apart.
+    Returns None (not 0) when it can't be computed, so the frontend can
+    render 'N/A' instead of a misleading zero."""
+    if v_start is None or v_end is None or n_years is None or n_years <= 0:
+        return None
+    try:
+        v_start = float(v_start)
+        v_end   = float(v_end)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(v_start) or pd.isna(v_end) or v_start <= 0:
+        return None
+    return round((v_end / v_start) ** (1.0 / n_years) - 1.0, 4)
+
+
+def _export_forecast_json(country, ec_full, blended_lvl, hw_levels, lin_pct,
+                            elasticities, clean_features, feature_lag_map,
+                            blend_hw, blend_el, blend_ml,
+                            train_end, test_end, out_dir, start_year=None):
+    """
+    Phase 1 data-layer export.
+
+    Series conventions used by the frontend:
+      - "actual"            : real Euroconstruct history, start_year..train_end
+      - "referenceForecast" : Euroconstruct's OWN reference/consensus figures
+                               for the forecast years (train_end+1..test_end)
+                               — this is what "actual CAGR" is computed from,
+                               since there's no true actual yet for those years
+      - "predictedForecast" : this pipeline's blended model forecast for the
+                               same forecast years — "predicted CAGR" is
+                               computed from this
+      - "holtWintersComponent" / "mlEnsembleYoY" : the two model components,
+                               for anyone who wants to show them as extra
+                               overlay lines
+
+    cagr.reference vs cagr.predicted are directly comparable: same start
+    point (train_end actual level), same end year (test_end), one following
+    Euroconstruct's own numbers and one following this model's forecast.
+    """
+    _start         = start_year if start_year is not None else int(ec_full.index.min())
+    hist_years     = list(range(_start, train_end + 1))
+    forecast_years = list(range(train_end + 1, test_end + 1))
+
+    def _v(x):
+        if x is None:
+            return None
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if pd.isna(x) else round(x, 3)
+
+    actual_series = [
+        {"year": y, "value": _v(ec_full.loc[y]) if y in ec_full.index else None}
+        for y in hist_years
+    ]
+    reference_forecast_series = [
+        {"year": y, "value": _v(ec_full.loc[y]) if y in ec_full.index else None}
+        for y in forecast_years
+    ]
+    predicted_forecast_series = [
+        {"year": y, "value": _v(blended_lvl.get(y))}
+        for y in forecast_years
+    ]
+    hw_component_series = [
+        {"year": y, "value": _v(hw_levels.get(y))}
+        for y in forecast_years
+    ]
+    ml_yoy_series = [
+        {"year": y, "value": _v(lin_pct.get("LinearEnsemble", {}).get(y))}
+        for y in forecast_years
+    ]
+
+    base_level = ec_full.loc[train_end] if train_end in ec_full.index else None
+    ref_end    = ec_full.loc[test_end]  if test_end  in ec_full.index else None
+    pred_end   = blended_lvl.get(test_end)
+    n_years    = test_end - train_end
+
+    cagr_reference = _cagr(base_level, ref_end,  n_years)
+    cagr_predicted = _cagr(base_level, pred_end, n_years)
+
+    # Only the KPIs that actually survived feature selection for this
+    # country ("Major Effecting KPIs") — not the full KPI catalogue.
+    major_kpis = [
+        {
+            "id":         kpi,
+            "label":      KPI_LABELS.get(kpi, kpi.replace("_", " ").title()),
+            "elasticity": elasticities.get(kpi),
+            "lagYears":   feature_lag_map.get(kpi, 0),
+        }
+        for kpi in clean_features
+    ]
+
+    payload = {
+        "country":            country,
+        "startYear":          _start,
+        "trainEnd":           train_end,
+        "testEnd":            test_end,
+        "blendWeights": {
+            "holtWinters": blend_hw,
+            "elasticity":  blend_el,
+            "mlEnsemble":  blend_ml,
+        },
+        "actual":              actual_series,
+        "referenceForecast":   reference_forecast_series,
+        "predictedForecast":   predicted_forecast_series,
+        "holtWintersComponent": hw_component_series,
+        "mlEnsembleYoY":        ml_yoy_series,
+        "cagr": {
+            "startYear": train_end,
+            "endYear":   test_end,
+            "reference": cagr_reference,   # Euroconstruct's own forecast CAGR
+            "predicted": cagr_predicted,   # this model's blended forecast CAGR
+        },
+        "majorEffectingKpis": major_kpis,
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{country.replace(' ', '_')}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"  Dashboard JSON saved: {path}")
+    return path
 
 
 # =============================================================================

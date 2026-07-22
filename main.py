@@ -24,6 +24,7 @@
 # =============================================================================
 
 import sys
+import os
 import traceback
 
 import numpy as np
@@ -421,6 +422,17 @@ def main():
 
     if multi:
         _print_run_summary(all_results)
+
+    # Write output/index.json so the React app's country selector knows
+    # which {Country}.json files actually exist, without hardcoding a list.
+    ok_countries = [r["country"] for r in all_results if r["status"] == "ok"]
+    if ok_countries:
+        import json
+        from forecastmodel import OUT_DIR
+        index_path = os.path.join(OUT_DIR, "index.json")
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump({"countries": sorted(ok_countries)}, f, indent=2)
+        print(f"\n  Dashboard index saved: {index_path}")
 
     print("\n" + "=" * 72)
     print("  Pipeline complete.")
