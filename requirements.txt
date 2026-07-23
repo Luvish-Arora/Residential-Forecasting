@@ -1,8 +1,10 @@
-pandas
-numpy
-matplotlib
-scikit-learn
-statsmodels
-openpyxl
-xlrd
-npm
+# Residential_f3 forecasting pipeline — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.4      # ElasticNetCV, Ridge, Lasso, ElasticNet, StandardScaler, metrics
+statsmodels>=0.14       # ExponentialSmoothing (Holt-Winters)
+matplotlib>=3.8         # chart PNG export (uses the "Agg" backend, no GUI needed)
+openpyxl>=3.1            # writes .xlsx (blended_forecast, cumulative workbook) and reads Euroconstruct source .xlsx
+xlrd>=2.0                # reads legacy .xls source files (e.g. Housing_permits.xls)
