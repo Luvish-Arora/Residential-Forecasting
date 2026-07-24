@@ -1180,12 +1180,56 @@ def run_forecast(prep):
     print(f"  Chart B saved: {chart_b_path}")
 
     # =========================================================================
+    # ML-ENSEMBLE COEFFICIENTS (Phase 3 — fixes Gap #1)
+    # =========================================================================
+    # The 3 fixed elasticities (housing permits / interest rate / labor
+    # cost) never covered every KPI ElasticNet actually selected — e.g.
+    # gdp_yoy or disposable_income_yoy had no coefficient at all, so their
+    # dashboard sliders had nothing to compute against.
+    #
+    # This fits the same Ridge/Lasso/ElasticNet ensemble, on the same
+    # training window (_train_slice / _sw) that the real forecast already
+    # uses, ONE more time on the full pre-forecast window. It then
+    # un-scales each model's StandardScaler-space coefficient back to raw
+    # units (coef_ / feature_std) and averages across the 3 models, the
+    # same way their predictions are already ensembled. Result: one
+    # coefficient per clean_feature, with full coverage — not just 3 KPIs.
+    def _compute_ml_coefficients():
+        tr_full = _train_slice(train_window)
+        cols = clean_features + [target_pct]
+        tr = tr_full[cols].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(tr) < MIN_TRAIN_ROWS:
+            return {}
+        sw = _sw(tr)
+        sc = StandardScaler()
+        Xtr = sc.fit_transform(tr[clean_features].values)
+        ridge_alpha = RIDGE_ALPHA_MAP.get(COUNTRY, RIDGE_ALPHA)
+        y = tr[target_pct].values
+        fitted = [
+            Ridge(ridge_alpha).fit(Xtr, y, sample_weight=sw),
+            Lasso(LASSO_ALPHA, max_iter=10000).fit(Xtr, y, sample_weight=sw),
+            ElasticNet(ENET_ALPHA, l1_ratio=ENET_L1, max_iter=10000).fit(Xtr, y, sample_weight=sw),
+        ]
+        scale = sc.scale_
+        coefs = {}
+        for i, feat in enumerate(clean_features):
+            if scale[i] == 0:
+                coefs[feat] = None
+                continue
+            per_model = [m.coef_[i] / scale[i] for m in fitted]
+            coefs[feat] = round(float(np.mean(per_model)), 4)
+        return coefs
+
+    ml_coefficients = _compute_ml_coefficients()
+
+    # =========================================================================
     # JSON OUTPUT (React dashboard data layer — Phase 1)
     # =========================================================================
     _export_forecast_json(
         country=COUNTRY, ec_full=ec_full,
         blended_lvl=blended_lvl, hw_levels=hw_levels, lin_pct=lin_pct,
-        elasticities=elasticities, clean_features=clean_features,
+        elasticities=elasticities, ml_coefficients=ml_coefficients,
+        clean_features=clean_features,
         feature_lag_map=feature_lag_map,
         blend_hw=blend_hw, blend_el=blend_el, blend_ml=blend_ml,
         train_end=train_end, test_end=test_end, out_dir=OUT_DIR,
@@ -1234,7 +1278,8 @@ def _cagr(v_start, v_end, n_years):
 
 
 def _export_forecast_json(country, ec_full, blended_lvl, hw_levels, lin_pct,
-                            elasticities, clean_features, feature_lag_map,
+                            elasticities, ml_coefficients, clean_features,
+                            feature_lag_map,
                             blend_hw, blend_el, blend_ml,
                             train_end, test_end, out_dir, start_year=None):
     """
@@ -1299,29 +1344,54 @@ def _export_forecast_json(country, ec_full, blended_lvl, hw_levels, lin_pct,
     cagr_reference = _cagr(base_level, ref_end,  n_years)
     cagr_predicted = _cagr(base_level, pred_end, n_years)
 
+    def _lag_years(kpi):
+        # feature_lag_map stores the LAGGED COLUMN NAME (e.g.
+        # "housing_permits_yoy_lag1"), not a lag count — this was
+        # previously dumped straight into the JSON as-is, which is why
+        # the dashboard was showing "lag housing_permits_yoy_lag1y".
+        mapped = feature_lag_map.get(kpi, kpi)
+        return 1 if isinstance(mapped, str) and mapped.endswith("_lag1") else 0
+
+    def _kpi_label(kpi):
+        base = kpi[:-5] if kpi.endswith("_lag1") else kpi
+        label = KPI_LABELS.get(base, base.replace("_", " ").title())
+        return f"{label} (prior year)" if kpi.endswith("_lag1") and base != kpi else label
+
     # Major Effecting KPIs = the 3 fixed elasticity KPIs (housing permits,
-    # interest rate change, labor cost — always present, since they're the
-    # ones with a real elasticity coefficient behind them) UNION whatever
+    # interest rate change, labor cost — always present) UNION whatever
     # ElasticNet actually selected for this country (clean_features).
-    # Nothing from the rest of the KPI catalogue is included — only KPIs
-    # that were either always-on or actually chosen for this specific
-    # country's model show up here.
+    # Nothing from the rest of the KPI catalogue is included.
     major_kpi_ids = list(ELASTICITY_KPIS) + [
         f for f in clean_features if f not in ELASTICITY_KPIS
     ]
-    major_kpis = [
-        {
-            "id":         kpi,
-            "label":      KPI_LABELS.get(kpi, kpi.replace("_", " ").title()),
-            "elasticity": elasticities.get(kpi),
-            "lagYears":   feature_lag_map.get(kpi, 0),
+
+    def _coefficient(kpi):
+        # Prefer the fixed, hand-validated elasticity (housing permits /
+        # interest rate / labor cost) where one exists. Otherwise fall
+        # back to the ML-ensemble coefficient (Phase 3 fix — covers every
+        # KPI ElasticNet actually selected, not just those 3).
+        fixed = elasticities.get(kpi)
+        if fixed is not None:
+            return fixed, "fixed"
+        ml = ml_coefficients.get(kpi)
+        if ml is not None:
+            return ml, "ml_ensemble"
+        return None, None
+
+    major_kpis = []
+    for kpi in major_kpi_ids:
+        coef, source = _coefficient(kpi)
+        major_kpis.append({
+            "id":                kpi,
+            "label":             _kpi_label(kpi),
+            "elasticity":        coef,
+            "coefficientSource": source,   # "fixed" | "ml_ensemble" | None
+            "lagYears":          _lag_years(kpi),
             # True if ElasticNet actually picked this KPI for this
             # country's model; False means it's here only because it's
             # one of the 3 always-on elasticity KPIs.
-            "selected":   kpi in clean_features,
-        }
-        for kpi in major_kpi_ids
-    ]
+            "selected":          kpi in clean_features,
+        })
 
     payload = {
         "country":            country,

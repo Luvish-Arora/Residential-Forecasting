@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 data/
 output/
+.venv/
+dashboard/node_modules/
+dashboard/dist/
+.DS_Store
+Thumbs.db
